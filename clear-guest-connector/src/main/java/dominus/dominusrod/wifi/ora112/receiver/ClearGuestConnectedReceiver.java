@@ -190,6 +190,12 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
                             Log.e("[ClearGuest]", "ConnectivityManager.setMobileDataEnabled Failed " + e.getCause());
                         }
                         wifiKey = requestWifiKey(context);
+                        try {
+                            Log.i("[ClearGuest]", "Disabling Mobile Network");
+                            this.setMobileDataEnabled(context, false);
+                        } catch (Exception e) {
+                            Log.e("[ClearGuest]", "ConnectivityManager.setMobileDataEnabled Failed " + e.getCause());
+                        }
                     }
                 }
 
