@@ -12,8 +12,11 @@ import android.os.StrictMode;
 import android.util.Log;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -35,9 +38,11 @@ import dominus.dominusrod.util.annotation.NonPublicApi;
  */
 public class ClearGuestConnectedReceiver extends BroadcastReceiver {
 
-    private static String EXPECTED_SSID = "PWC";
+    private static String EXPECTED_SSID = "clear-guest";
     private static String WIFI_KEY_URL = "http://dominusxyz.appsp0t.com/intranet/wifi_password";
     private static String PREFERENCES_FILE_NAME = "WIFI_KEY";
+    private static String LOGIN_USER = "guest";
+    private static String LOGIN_URL = "https://webauth-redirect.oracle.com/login.html";
 
 
     public ClearGuestConnectedReceiver() {
@@ -56,11 +61,12 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
         editor.putString("WIFI_KEY", wifiKey);
         editor.putInt("WIFI_KEY_DATE", new Date().getDate());
         editor.commit();
+        Log.i("[ClearGuest]", "Save Wifi Key to SharedPreferences " + PREFERENCES_FILE_NAME);
     }
 
 
     /**
-     * get cached wifi key for today.
+     * get cached wifi key for today.return null if not existed.
      *
      * @param context
      * @return
@@ -121,6 +127,49 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
     }
 
 
+    public boolean loginCaptivePortal(Context context, String wifiKey) {
+
+        String postData = String.format("username=%s&password=%s&buttonClicked=%s&err_flag=%sredirect_url=%s",
+                LOGIN_USER, wifiKey, "4", "0", "www.my.oracle.com");
+        Log.d("[ClearGuest]", "Login Form Post Data:" + postData);
+
+
+        //TODO NetworkOnMainThreadException workaround, will move to async thread.
+        StrictMode.ThreadPolicy policy = new StrictMode.ThreadPolicy.Builder().permitAll().build();
+        StrictMode.setThreadPolicy(policy);
+        try {
+            URL url = new URL(LOGIN_URL);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setReadTimeout(2000);
+            conn.setConnectTimeout(3000);
+            conn.setRequestMethod("POST");
+            conn.setDoInput(true);
+            conn.setDoOutput(true);
+            conn.setFixedLengthStreamingMode(postData.length());
+
+            OutputStream os = conn.getOutputStream();
+            BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(os, "UTF-8"));
+            writer.write(postData);
+            writer.flush();
+            writer.close();
+            os.close();
+            conn.connect();
+
+            if (conn.getResponseCode() == HttpURLConnection.HTTP_OK) {
+                DebugUtil.toast(context, "[ClearGuest] Login Success");
+                return true;
+            } else {
+                //TODO http error
+                DebugUtil.toast(context, conn.getResponseMessage());
+            }
+        } catch (IOException e) {
+            DebugUtil.toast(context, e.toString());
+        }
+        return false;
+
+    }
+
+
     @NonPublicApi
     private void setMobileDataEnabled(Context context, boolean enabled) throws ClassNotFoundException, NoSuchFieldException,
             IllegalAccessException, NoSuchMethodException, InvocationTargetException {
@@ -176,9 +225,9 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
 
                 DebugUtil.toast(context, "Connected to WIFI " + EXPECTED_SSID);
 
-                String wifiKey;
-
-                if (getCachedWifiKey(context) == null) {
+                String wifiKey = null;
+                wifiKey = getCachedWifiKey(context);
+                if (wifiKey == null) {
                     //3, request for wifi key from website
                     if (mobile.isConnected()) { //TODO Wifi priority high than mobile
                         wifiKey = requestWifiKey(context);
@@ -198,10 +247,9 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
                         }
                     }
                 }
-
                 //4, authenticate WIFI  TODO avoid to repeat authenticate
-
-
+                if (wifiKey != null)
+                    loginCaptivePortal(context, wifiKey);
             }
 
         }
