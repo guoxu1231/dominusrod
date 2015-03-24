@@ -18,7 +18,6 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -30,11 +29,20 @@ import dominus.dominusrod.util.annotation.NonPublicApi;
 
 
 /**
- * 1, check if WIFI connected and SSID is clear-guest <br>
- * 2, check GPRS status, enable the GPRS if not.<br>
- * 3, request for wifi key from website<br>
- * 4, authenticate WIFI;<br>
- * 5, restore GPRS status;<br>
+ * State-aware Receiver:
+ *      identify initial state and trigger state transition;
+ *      switch mobile/wifi in async manner to avoid connectivity state chaos;
+ *      1, wifi connect to clear-guest;
+ *      2, if no cached wifi, trigger "mobile request wifi key" step; elsewise login wifi portal by cached key;
+ *      3, In mobile network, request wifi key and cache it, restore network state and move to login step;
+ *      4, login wifi portal
+ *
+ * One-time Receiver(Retired) :
+ *      1, check if WIFI connected and SSID is clear-guest <br>
+ *      2, check GPRS status, enable the GPRS if not.<br>
+ *      3, request for wifi key from website<br>
+ *      4, authenticate WIFI;<br>
+ *      5, restore GPRS status;<br>
  */
 public class ClearGuestConnectedReceiver extends BroadcastReceiver {
 
@@ -43,11 +51,35 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
     private static String PREFERENCES_FILE_NAME = "WIFI_KEY";
     private static String LOGIN_USER = "guest";
     private static String LOGIN_URL = "https://webauth-redirect.oracle.com/login.html";
-
+    private static String AUTO_LOGIN_STATE = "AUTO_LOGIN_STATE";
+    private static int INVALID_NETWORK_ID = -99;
 
     public ClearGuestConnectedReceiver() {
     }
 
+    /**
+     * Trigger auto-login process once connect to wifi(clear-guest);
+     */
+    private enum AutoLoginState {
+        WIFI_CONNECTED_INITIAL,  //initial state, then disable wifi, enable mobile,
+        MOBILE_REQUEST_KEY_REQUIRED, //get wifi key, then restore network. disable mobile and enable wifi
+        WIFI_AUTHENCATE_REQUIRED, //has wifi key and do wifi authentication.
+    }
+
+    private AutoLoginState getState(Context context) {
+        SharedPreferences mySharedPreferences = context.getSharedPreferences(PREFERENCES_FILE_NAME, Context.MODE_PRIVATE);
+        AutoLoginState state = AutoLoginState.valueOf(mySharedPreferences.getString(AUTO_LOGIN_STATE,
+                AutoLoginState.WIFI_CONNECTED_INITIAL.toString()));
+        return state;
+    }
+
+    private void saveState(Context context, AutoLoginState state) {
+        SharedPreferences mySharedPreferences = context.getSharedPreferences(PREFERENCES_FILE_NAME, Context.MODE_PRIVATE);
+        SharedPreferences.Editor editor = mySharedPreferences.edit();
+        editor.putString(AUTO_LOGIN_STATE, state.toString());
+        editor.commit();
+        Log.i("[ClearGuest]", "Set State:" + state.toString());
+    }
 
     /**
      * Save wifi key to shared preferences file.
@@ -64,6 +96,18 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
         Log.i("[ClearGuest]", "Save Wifi Key to SharedPreferences " + PREFERENCES_FILE_NAME);
     }
 
+    private void saveNetworkId(Context context, int clearGuestId) {
+        SharedPreferences mySharedPreferences = context.getSharedPreferences(PREFERENCES_FILE_NAME, Context.MODE_PRIVATE);
+        SharedPreferences.Editor editor = mySharedPreferences.edit();
+        editor.putInt("CLEAR_GUEST_NETWORK_ID", clearGuestId);
+        editor.commit();
+    }
+
+    private int getNetworkId(Context context) {
+        SharedPreferences mySharedPreferences = context.getSharedPreferences(PREFERENCES_FILE_NAME, Context.MODE_PRIVATE);
+        return mySharedPreferences.getInt("CLEAR_GUEST_NETWORK_ID", INVALID_NETWORK_ID);
+    }
+
 
     /**
      * get cached wifi key for today.return null if not existed.
@@ -71,7 +115,7 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
      * @param context
      * @return
      */
-    private String getCachedWifiKey(Context context) {
+    protected String getCachedWifiKey(Context context) {
         SharedPreferences mySharedPreferences = context.getSharedPreferences(PREFERENCES_FILE_NAME, Context.MODE_PRIVATE);
         if (mySharedPreferences.getInt("WIFI_KEY_DATE", -1) == new Date().getDate())
             return mySharedPreferences.getString("WIFI_KEY", null);
@@ -79,22 +123,18 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
             return null;
     }
 
-
-    private String requestWifiKey(Context context) {
+    /**
+     * Request Wifi Key from WIFI_KEY_URL.(Must be in mobile network)
+     * @param context
+     * @return
+     */
+    protected String requestWifiKey(Context context) {
 
         String wifiKey = null;
-        wifiKey = getCachedWifiKey(context);
-        if (wifiKey == null)
-            Log.i("[ClearGuest]", "Will request Wifi Key from " + WIFI_KEY_URL);
-        else {
-            Log.i("[ClearGuest] ", "Cached Wifi Key:" + wifiKey);
-            return wifiKey;
-        }
 
         //TODO NetworkOnMainThreadException workaround, will move to async thread.
         StrictMode.ThreadPolicy policy = new StrictMode.ThreadPolicy.Builder().permitAll().build();
         StrictMode.setThreadPolicy(policy);
-
 
         Date start, end;
         try {
@@ -102,10 +142,9 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
             URL url = new URL(WIFI_KEY_URL);
             URLConnection connection = url.openConnection();
             HttpURLConnection httpConnection = (HttpURLConnection) connection;
-            httpConnection.setReadTimeout(2500);
-            httpConnection.setConnectTimeout(2500 /* milliseconds */);
+            httpConnection.setReadTimeout(4000);
+            httpConnection.setConnectTimeout(4000 /* milliseconds */);
             httpConnection.setRequestMethod("GET");
-//                        httpConnection.setDoInput(true);
             httpConnection.connect();
             int responseCode = httpConnection.getResponseCode();
             if (responseCode == HttpURLConnection.HTTP_OK) {
@@ -113,26 +152,37 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
                 wifiKey = reader.readLine();
                 httpConnection.disconnect();
                 end = new Date();
-                DebugUtil.toast(context, "Wifi Key Requst Success: " + wifiKey + " Total Time(ms): " + (end.getTime() - start.getTime()));
+                if (wifiKey.length() > 0 && wifiKey.length() < 15)
+                    DebugUtil.toast(context, "[ClearGuest] Wifi Key Requst Success: " + wifiKey + " Total Time(ms): " + (end.getTime() - start.getTime()));
+                else {
+                    DebugUtil.toast(context, "[ClearGuest] Wifi Key Request Failed:" + wifiKey); //use unauthenticated wifi
+                    return null;
+                }
             } else {
-                //TODO http error
                 DebugUtil.toast(context, httpConnection.getResponseMessage());
             }
         } catch (IOException e) {
             DebugUtil.toast(context, e.toString());
         }
 
-        saveWifiKey(context, wifiKey);
         return wifiKey;
     }
 
 
-    public boolean loginCaptivePortal(Context context, String wifiKey) {
+    /**
+     * Login wifi portal by wifi connection;
+     * 1, not able to identify current login status;
+     * 2, repeat login when re-connect to clear-guest
+     *
+     * @param context
+     * @param wifiKey
+     * @return
+     */
+    protected boolean loginWifiPortal(Context context, String wifiKey) {
 
         String postData = String.format("username=%s&password=%s&buttonClicked=%s&err_flag=%sredirect_url=%s",
                 LOGIN_USER, wifiKey, "4", "0", "www.my.oracle.com");
         Log.d("[ClearGuest]", "Login Form Post Data:" + postData);
-
 
         //TODO NetworkOnMainThreadException workaround, will move to async thread.
         StrictMode.ThreadPolicy policy = new StrictMode.ThreadPolicy.Builder().permitAll().build();
@@ -159,7 +209,6 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
                 DebugUtil.toast(context, "[ClearGuest] Login Success");
                 return true;
             } else {
-                //TODO http error
                 DebugUtil.toast(context, conn.getResponseMessage());
             }
         } catch (IOException e) {
@@ -171,18 +220,24 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
 
 
     @NonPublicApi
-    private void setMobileDataEnabled(Context context, boolean enabled) throws ClassNotFoundException, NoSuchFieldException,
-            IllegalAccessException, NoSuchMethodException, InvocationTargetException {
+    protected void setMobileDataEnabled(Context context, boolean enabled) {
         final ConnectivityManager conman = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
-        final Class conmanClass = Class.forName(conman.getClass().getName());
-        final Field connectivityManagerField = conmanClass.getDeclaredField("mService");
-        connectivityManagerField.setAccessible(true);
-        final Object connectivityManager = connectivityManagerField.get(conman);
-        final Class connectivityManagerClass = Class.forName(connectivityManager.getClass().getName());
-        final Method setMobileDataEnabledMethod = connectivityManagerClass.getDeclaredMethod("setMobileDataEnabled", Boolean.TYPE);
-        setMobileDataEnabledMethod.setAccessible(true);
+        final Class conmanClass;
 
-        setMobileDataEnabledMethod.invoke(connectivityManager, enabled);
+        try {
+            conmanClass = Class.forName(conman.getClass().getName());
+
+            final Field connectivityManagerField = conmanClass.getDeclaredField("mService");
+            connectivityManagerField.setAccessible(true);
+            final Object connectivityManager = connectivityManagerField.get(conman);
+            final Class connectivityManagerClass = Class.forName(connectivityManager.getClass().getName());
+            final Method setMobileDataEnabledMethod = connectivityManagerClass.getDeclaredMethod("setMobileDataEnabled", Boolean.TYPE);
+            setMobileDataEnabledMethod.setAccessible(true);
+            setMobileDataEnabledMethod.invoke(connectivityManager, enabled);
+            Log.i("[ClearGuest]", "setMobileDataEnabled: " + enabled);
+        } catch (Exception e) {
+            DebugUtil.toast(context, e.toString());
+        }
     }
 
 
@@ -196,61 +251,158 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
 
         DebugUtil.debugIntent(context.getPackageName(), intent);
 
-        // connected to WIFI supplicant
+        /**
+         * Sumsang Note 2 Network switch Events
+         *      wifi and mobile are mutually exclusive;
+         *
+         * For example:
+         * scen-1,
+         *      mobile is on, enable wifi => open wifi event, mobile close event(isFailover=true), open wifi event
+         * scen-2
+         *      mobile is on, wifi is on, disable wifi => close wifi event, enable mobile event
+         * scen-3
+         *      wifi is on, enable mobile => close mobile(isFailover=true), enable wifi
+         **/
+        //TODO add error report mechanism
+
         if (intent.getAction().equals(ConnectivityManager.CONNECTIVITY_ACTION)) {
 
             NetworkInfo activeNetwork = connectivity.getActiveNetworkInfo();
-            WifiInfo info = wifiManager.getConnectionInfo();
+            WifiInfo wifiInfo = wifiManager.getConnectionInfo();
             NetworkInfo mobile = connectivity.getNetworkInfo(ConnectivityManager.TYPE_MOBILE);
             NetworkInfo wifi = connectivity.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
             NetworkInfo event = intent.getParcelableExtra(ConnectivityManager.EXTRA_NETWORK_INFO);
+            AutoLoginState currentState = getState(context);
 
-            if (activeNetwork == null || //no connected networks at all
-                    event.getType() != ConnectivityManager.TYPE_WIFI) //not wifi event
-                return;
+            Log.i("[ClearGuest]", "Current State: " + currentState.toString());//TODO
 
-            if (activeNetwork.getType() == ConnectivityManager.TYPE_MOBILE) {
-                Log.i("\t[Active][Mobile State]", mobile.toString());
-                Log.i("\t[Wifi State]", wifi.toString());
-            }
-            if (activeNetwork.getType() == ConnectivityManager.TYPE_WIFI) {
-                Log.i("\t[Active][Wifi State]", wifi.toString());
-                Log.i("\t[Active][Wifi Detail]", info.toString());
-                Log.i("\t[Mobile State]", mobile.toString());
-            }
+            //initial state - WIFI_CONNECTED_INITIAL
+            if (activeNetwork != null && activeNetwork.getType() == ConnectivityManager.TYPE_WIFI &&
+                    wifi.isConnected() &&
+                    wifiInfo != null && wifiInfo.getSSID() != null && wifiInfo.getSSID().equalsIgnoreCase(EXPECTED_SSID)) {
 
-            //1, check if WIFI connected and SSID is clear-guest  //TODO wifi authentication status?
-            if (wifi.isConnected() &&
-                    info != null && info.getSSID() != null && info.getSSID().equalsIgnoreCase(EXPECTED_SSID)) {
+                DebugUtil.toast(context, "[ClearGuest] Connecting to WIFI " + EXPECTED_SSID);//TODO
 
-                DebugUtil.toast(context, "Connected to WIFI " + EXPECTED_SSID);
+                String cachedWifiKey = getCachedWifiKey(context);
 
-                String wifiKey = null;
-                wifiKey = getCachedWifiKey(context);
-                if (wifiKey == null) {
-                    //3, request for wifi key from website
-                    if (mobile.isConnected()) { //TODO Wifi priority high than mobile
-                        wifiKey = requestWifiKey(context);
-                    } else { //2, check GPRS status, enable the GPRS if not.
-                        try {
-                            Log.i("[ClearGuest]", "Enabling Mobile Network");
-                            this.setMobileDataEnabled(context, true);
-                        } catch (Exception e) {
-                            Log.e("[ClearGuest]", "ConnectivityManager.setMobileDataEnabled Failed " + e.getCause());
-                        }
-                        wifiKey = requestWifiKey(context);
-                        try {
-                            Log.i("[ClearGuest]", "Disabling Mobile Network");
-                            this.setMobileDataEnabled(context, false);
-                        } catch (Exception e) {
-                            Log.e("[ClearGuest]", "ConnectivityManager.setMobileDataEnabled Failed " + e.getCause());
-                        }
+                if (currentState.equals(AutoLoginState.WIFI_CONNECTED_INITIAL)) {
+                    if (cachedWifiKey == null) { // => go to 2rd state;
+                        //wifi/mobile are exclusive
+                        wifiManager.setWifiEnabled(false);
+                        this.setMobileDataEnabled(context, true);
+                        saveNetworkId(context, wifiInfo.getNetworkId());
+                        saveState(context, AutoLoginState.MOBILE_REQUEST_KEY_REQUIRED);
+                        return;
+                    } else {
+                        DebugUtil.toast(context, "[ClearGuest] Cached Wifi Key:" + cachedWifiKey);
+                        loginWifiPortal(context, getCachedWifiKey(context));
+                        saveState(context, AutoLoginState.WIFI_CONNECTED_INITIAL);
                     }
+                    return;
+                } else {
+                    saveState(context, AutoLoginState.WIFI_CONNECTED_INITIAL);
                 }
-                //4, authenticate WIFI  TODO avoid to repeat authenticate
-                if (wifiKey != null)
-                    loginCaptivePortal(context, wifiKey);
             }
+
+            //second state - MOBILE_REQUEST_KEY_REQUIRED
+            if (activeNetwork != null && activeNetwork.getType() == ConnectivityManager.TYPE_MOBILE &&
+                    mobile.isConnected() && currentState.equals(AutoLoginState.MOBILE_REQUEST_KEY_REQUIRED)) {
+
+                Log.i("[ClearGuest]", "Will request Wifi Key from " + WIFI_KEY_URL);
+                String wifiKey = requestWifiKey(context);
+
+                if (wifiKey != null)
+                    saveWifiKey(context, wifiKey);
+
+                //restore network
+                this.setMobileDataEnabled(context, false);
+
+                wifiManager.setWifiEnabled(true);
+                //re-connect to clear-guest
+                int clearGuestId = getNetworkId(context);
+                if (clearGuestId != INVALID_NETWORK_ID)
+                    wifiManager.enableNetwork(clearGuestId, true);
+
+                saveState(context, AutoLoginState.WIFI_AUTHENCATE_REQUIRED);
+                return;
+            }
+
+            //third state - WIFI_AUTHENCATE_REQUIRED
+            if (activeNetwork != null && activeNetwork.getType() == ConnectivityManager.TYPE_WIFI &&
+                    wifi.isConnected() &&
+                    wifiInfo != null && wifiInfo.getSSID() != null && wifiInfo.getSSID().equalsIgnoreCase(EXPECTED_SSID) &&
+                    currentState.equals(AutoLoginState.WIFI_AUTHENCATE_REQUIRED)) {
+
+                String wifiKey = getCachedWifiKey(context);
+                if (wifiKey != null)
+                    loginWifiPortal(context, wifiKey);
+                saveState(context, AutoLoginState.WIFI_CONNECTED_INITIAL);
+                return;
+            }
+
+
+            /**
+             *  Retired Solution:
+             *      1, enable/disable wifi or mobile is async process; we can not finish all three steps in one time;
+             *      2, mobile and wifi are mutually exclusive radio, we can not finish frquently network switch in one time;
+             */
+            /**
+             if (activeNetwork.getType() == ConnectivityManager.TYPE_MOBILE) {
+             Log.i("\t[Active][Mobile State]", mobile.toString());
+             Log.i("\t[Wifi State]", wifi.toString());
+             }
+             if (activeNetwork.getType() == ConnectivityManager.TYPE_WIFI) {
+             Log.i("\t[Active][Wifi State]", wifi.toString());
+             Log.i("\t[Active][Wifi Detail]", info.toString());
+             Log.i("\t[Mobile State]", mobile.toString());
+
+             **/
+
+            /**
+             //1, check if WIFI connected and SSID is clear-guest
+             if (wifi.isConnected() &&
+             wifiInfo != null && wifiInfo.getSSID() != null && wifiInfo.getSSID().equalsIgnoreCase(EXPECTED_SSID)) {
+
+             DebugUtil.toast(context, "Connected to WIFI " + EXPECTED_SSID);
+
+             String wifiKey = null;
+             wifiKey = getCachedWifiKey(context);
+             if (wifiKey == null) {
+
+             //switch to mobile network
+             DebugUtil.toast(context, "Switch to Mobile Network");
+
+
+             //3, request for wifi key from website
+             if (mobile.isConnected()) {
+             connectivity.setNetworkPreference(ConnectivityManager.TYPE_MOBILE);
+             wifiKey = requestWifiKey(context);
+             } else { //2, check GPRS status, enable the GPRS if not.
+             try {
+             Log.i("[ClearGuest]", "Enabling Mobile Network");
+             this.setMobileDataEnabled(context, true);
+             } catch (Exception e) {
+             Log.e("[ClearGuest]", "ConnectivityManager.setMobileDataEnabled Failed " + e.getCause());
+             }
+             if (mobile.isConnected()) { //Always call this before attempting to perform data transactions!!!
+             connectivity.setNetworkPreference(ConnectivityManager.TYPE_MOBILE);
+             wifiKey = requestWifiKey(context);
+             }
+             try {
+             Log.i("[ClearGuest]", "Disabling Mobile Network");
+             this.setMobileDataEnabled(context, false);
+             } catch (Exception e) {
+             Log.e("[ClearGuest]", "ConnectivityManager.setMobileDataEnabled Failed " + e.getCause());
+             }
+             }
+             //switch back to default network preference
+             connectivity.setNetworkPreference(ConnectivityManager.DEFAULT_NETWORK_PREFERENCE);
+
+             }
+             //4, authenticate WIFI
+             if (wifiKey != null)
+             loginWifiPortal(context, wifiKey);
+             } **/
 
         }
     }
