@@ -1,5 +1,5 @@
 # Dominusroid
-My android lab
+>My android lab, prototyping.
 ***
 
 #####[ClearGuest Connector]
