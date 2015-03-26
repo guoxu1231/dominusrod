@@ -8,8 +8,14 @@ import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
+import android.os.Handler;
 import android.os.StrictMode;
 import android.util.Log;
+import android.view.Gravity;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -24,6 +30,7 @@ import java.net.URL;
 import java.net.URLConnection;
 import java.util.Date;
 
+import dominus.dominusrod.R;
 import dominus.dominusrod.util.DebugUtil;
 import dominus.dominusrod.util.annotation.NonPublicApi;
 import dominus.dominusrod.util.devops.AppAnalytics;
@@ -58,6 +65,29 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
     private Date loginDate = new Date(0L);
 
     public ClearGuestConnectedReceiver() {
+    }
+
+
+    private void toast(final Context context, final CharSequence text) {
+
+        Log.i(context.getPackageName(), text.toString());
+
+        Handler h = new Handler(context.getMainLooper());
+
+        h.post(new Runnable() {
+            @Override
+            public void run() {
+                LayoutInflater inflater = (LayoutInflater) context.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
+                View customToastroot = inflater.inflate(R.layout.toast_clearguest_layout, null);
+                TextView textView = (TextView) customToastroot.findViewById(R.id.textToShow);
+                textView.setText(text);
+                Toast customtoast = new Toast(context);
+                customtoast.setView(customToastroot);
+                customtoast.setGravity(Gravity.CENTER_HORIZONTAL | Gravity.CENTER_VERTICAL, 0, 0);
+                customtoast.setDuration(Toast.LENGTH_SHORT);
+                customtoast.show();
+            }
+        });
     }
 
     /**
@@ -157,16 +187,16 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
                 httpConnection.disconnect();
                 end = new Date();
                 if (wifiKey.length() > 0 && wifiKey.length() < 15)
-                    DebugUtil.toast(context, "[ClearGuest] Wifi Key Requst Success: " + wifiKey + " Total Time(ms): " + (end.getTime() - start.getTime()));
+                    toast(context, "Wifi Key Requst Success: " + wifiKey + " Total Time(ms): " + (end.getTime() - start.getTime()));
                 else {
-                    DebugUtil.toast(context, "[ClearGuest] Wifi Key Request Failed:" + wifiKey); //use unauthenticated wifi
+                    toast(context, "Wifi Key Request Failed:" + wifiKey); //use unauthenticated wifi
                     return null;
                 }
             } else {
-                DebugUtil.toast(context, httpConnection.getResponseMessage());
+                toast(context, httpConnection.getResponseMessage());
             }
         } catch (IOException e) {
-            DebugUtil.toast(context, e.toString());
+            toast(context, e.toString());
         }
 
         return wifiKey;
@@ -210,13 +240,13 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
             conn.connect();
 
             if (conn.getResponseCode() == HttpURLConnection.HTTP_OK) {
-                DebugUtil.toast(context, "[ClearGuest] Login Success");
+                toast(context, "Login Success");
                 return true;
             } else {
-                DebugUtil.toast(context, conn.getResponseMessage());
+                toast(context, conn.getResponseMessage());
             }
         } catch (IOException e) {
-            DebugUtil.toast(context, e.toString());
+            toast(context, e.toString());
         }
         return false;
 
@@ -240,7 +270,7 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
             setMobileDataEnabledMethod.invoke(connectivityManager, enabled);
             Log.i("[ClearGuest]", "setMobileDataEnabled: " + enabled);
         } catch (Exception e) {
-            DebugUtil.toast(context, e.toString());
+            toast(context, e.toString());
         }
     }
 
@@ -252,7 +282,7 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
         ConnectivityManager connectivity =
                 (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
 
-
+        toast(context,"Network Event Happended");
         DebugUtil.debugIntent(context.getPackageName(), intent);
 
         /**
@@ -290,7 +320,7 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
                 if (currentState.equals(AutoLoginState.WIFI_CONNECTED_INITIAL) &&
                         new Date().getTime() - loginDate.getTime() > 15 * 1000) { //avoid repeat wifi login
 
-                    DebugUtil.toast(context, "[ClearGuest] Connecting to WIFI " + EXPECTED_SSID);//TODO
+                    toast(context, "Connecting to WIFI " + EXPECTED_SSID);//TODO
 
                     if (cachedWifiKey == null) { // => go to 2rd state;
                         //wifi/mobile are exclusive
@@ -300,7 +330,7 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
                         saveState(context, AutoLoginState.MOBILE_REQUEST_KEY_REQUIRED);
                         return;
                     } else {
-                        DebugUtil.toast(context, "[ClearGuest] Cached Wifi Key:" + cachedWifiKey);
+                        toast(context, "Cached Wifi Key:" + cachedWifiKey);
                         loginWifiPortal(context, getCachedWifiKey(context));
                         saveState(context, AutoLoginState.WIFI_CONNECTED_INITIAL);
                     }
@@ -345,7 +375,6 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
                 saveState(context, AutoLoginState.WIFI_CONNECTED_INITIAL);
                 return;
             }
-
 
             /**
              *  Retired Solution:

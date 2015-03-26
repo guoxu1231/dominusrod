@@ -1,0 +1,26 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/custom_toast_layout"
+    android:orientation="horizontal"
+    android:layout_width="fill_parent"
+    android:layout_height="fill_parent"
+    android:padding="8dip"
+    android:background="#DAAA">
+
+    <ImageView
+        android:src="@drawable/cookies"
+        android:layout_width="20dip"
+        android:layout_height="20dip"
+        android:layout_marginRight="8dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="#ff8a40"
+        android:text="[ClearGuest]  "/>
+
+    <TextView
+        android:id="@+id/textToShow"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="#FFF"/>
+</LinearLayout>
