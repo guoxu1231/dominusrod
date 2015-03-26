@@ -26,6 +26,7 @@ import java.util.Date;
 
 import dominus.dominusrod.util.DebugUtil;
 import dominus.dominusrod.util.annotation.NonPublicApi;
+import dominus.dominusrod.util.devops.AppAnalytics;
 
 
 /**
@@ -53,6 +54,8 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
     private static String LOGIN_URL = "https://webauth-redirect.oracle.com/login.html";
     private static String AUTO_LOGIN_STATE = "AUTO_LOGIN_STATE";
     private static int INVALID_NETWORK_ID = -99;
+
+    private Date loginDate = new Date(0L);
 
     public ClearGuestConnectedReceiver() {
     }
@@ -142,9 +145,10 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
             URL url = new URL(WIFI_KEY_URL);
             URLConnection connection = url.openConnection();
             HttpURLConnection httpConnection = (HttpURLConnection) connection;
-            httpConnection.setReadTimeout(4000);
-            httpConnection.setConnectTimeout(4000 /* milliseconds */);
+            httpConnection.setReadTimeout(5000);
+            httpConnection.setConnectTimeout(5000 /* milliseconds */);
             httpConnection.setRequestMethod("GET");
+            AppAnalytics.enrichCookies(context,httpConnection);
             httpConnection.connect();
             int responseCode = httpConnection.getResponseCode();
             if (responseCode == HttpURLConnection.HTTP_OK) {
@@ -190,8 +194,8 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
         try {
             URL url = new URL(LOGIN_URL);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setReadTimeout(2000);
-            conn.setConnectTimeout(3000);
+            conn.setReadTimeout(5000);
+            conn.setConnectTimeout(5000);
             conn.setRequestMethod("POST");
             conn.setDoInput(true);
             conn.setDoOutput(true);
@@ -281,11 +285,13 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
                     wifi.isConnected() &&
                     wifiInfo != null && wifiInfo.getSSID() != null && wifiInfo.getSSID().equalsIgnoreCase(EXPECTED_SSID)) {
 
-                DebugUtil.toast(context, "[ClearGuest] Connecting to WIFI " + EXPECTED_SSID);//TODO
-
                 String cachedWifiKey = getCachedWifiKey(context);
 
-                if (currentState.equals(AutoLoginState.WIFI_CONNECTED_INITIAL)) {
+                if (currentState.equals(AutoLoginState.WIFI_CONNECTED_INITIAL) &&
+                        new Date().getTime() - loginDate.getTime() > 15 * 1000) { //avoid repeat wifi login
+
+                    DebugUtil.toast(context, "[ClearGuest] Connecting to WIFI " + EXPECTED_SSID);//TODO
+
                     if (cachedWifiKey == null) { // => go to 2rd state;
                         //wifi/mobile are exclusive
                         wifiManager.setWifiEnabled(false);
@@ -334,8 +340,8 @@ public class ClearGuestConnectedReceiver extends BroadcastReceiver {
                     currentState.equals(AutoLoginState.WIFI_AUTHENCATE_REQUIRED)) {
 
                 String wifiKey = getCachedWifiKey(context);
-                if (wifiKey != null)
-                    loginWifiPortal(context, wifiKey);
+                if (wifiKey != null && loginWifiPortal(context, wifiKey))
+                    loginDate = new Date();
                 saveState(context, AutoLoginState.WIFI_CONNECTED_INITIAL);
                 return;
             }
